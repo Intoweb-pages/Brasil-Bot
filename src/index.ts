@@ -11,10 +11,13 @@ export interface Env {
 }
 
 function hexToUint8Array(hex: string) {
-  return new Uint8Array(hex.match(/.{1,2}/g)!.map((val) => parseInt(val, 16)));
+  const matches = hex.match(/.{1,2}/g);
+  if (!matches) return new Uint8Array();
+  return new Uint8Array(matches.map((val) => parseInt(val, 16)));
 }
 
 async function verifySignature(publicKeyHex: string, signatureHex: string, timestamp: string, body: string) {
+  if (!publicKeyHex) return false;
   try {
     const enc = new TextEncoder();
     const importedKey = await crypto.subtle.importKey(
@@ -28,6 +31,7 @@ async function verifySignature(publicKeyHex: string, signatureHex: string, times
     const data = enc.encode(timestamp + body);
     return await crypto.subtle.verify("Ed25519", importedKey, sig, data);
   } catch (e) {
+    console.error("Signature verification error:", e);
     return false;
   }
 }
@@ -44,7 +48,7 @@ async function sendFollowup(applicationId: string, interactionToken: string, pay
   }
 }
 
-async function handleRepeat(interaction: any, env: Env) {
+function getOptions(interaction: any) {
   const options = interaction.data.options || [];
   let count = 1;
   let text = "";
@@ -57,21 +61,21 @@ async function handleRepeat(interaction: any, env: Env) {
   }
 
   let content = text;
-  
   if (attachmentId && interaction.data.resolved?.attachments?.[attachmentId]) {
     const attachmentObj = interaction.data.resolved.attachments[attachmentId];
-    // DiscordにURLを送信することで画像がプレビュー（インライン表示）されます
     content = content ? `${content}\n${attachmentObj.url}` : attachmentObj.url;
   }
 
-  if (count > 20) count = 20; // 制限 (最大20回送る)
-  if (count < 1) count = 1;
+  return { count, content: content || "リピートする内容がありません" };
+}
 
-  for (let i = 0; i < count; i++) {
+async function handleRemainingRepeats(interaction: any, count: number, content: string, env: Env) {
+  // すでに1回目は即時返信(InteractionResponseType.ChannelMessageWithSource)で送っているため、残りの回数を送る
+  for (let i = 0; i < count - 1; i++) {
+    await new Promise(r => setTimeout(r, 500)); // 送信間隔を少し空ける
     await sendFollowup(interaction.application_id, interaction.token, {
-      content: content || "リピートする内容がありません",
+      content: content,
     });
-    await new Promise(r => setTimeout(r, 200)); // Sleep to prevent hitting rate limits
   }
 }
 
@@ -97,19 +101,29 @@ export default {
 
     const interaction: APIInteraction = JSON.parse(body);
 
-    // Discordからの最初の検証リクエスト (Ping) にはPongを返す必要があります
     if (interaction.type === InteractionType.Ping) {
-      return Response.json({ type: InteractionResponseType.Pong });
+      return new Response(JSON.stringify({ type: InteractionResponseType.Pong }), {
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     if (interaction.type === InteractionType.ApplicationCommand) {
       if (interaction.data.name === "brasil") {
-        // waitUntilを利用してバックグラウンドで複数回メッセージを送信する処理を実行します。
-        ctx.waitUntil(handleRepeat(interaction, env));
+        const { count, content } = getOptions(interaction);
 
-        // 即座に応答しないとDiscord側でタイムアウトしてエラーになるため、「考え中...」のステータスを即座に返します。
-        return Response.json({
-          type: InteractionResponseType.DeferredChannelMessageWithSource,
+        // タイムアウトを防ぐため、1回目は即座に正常なレスポンスとして返す
+        // 残りの回数はバックグラウンド(ctx.waitUntil)でWebhook(Followup)として送信する
+        if (count > 1) {
+          ctx.waitUntil(handleRemainingRepeats(interaction, count, content, env));
+        }
+
+        return new Response(JSON.stringify({
+          type: InteractionResponseType.ChannelMessageWithSource,
+          data: {
+            content: content,
+          },
+        }), {
+          headers: { "Content-Type": "application/json" },
         });
       }
     }
