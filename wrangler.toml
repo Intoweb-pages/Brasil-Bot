@@ -1,4 +1,4 @@
-name = "discord-cloudflare-bot"
+name = "brasilbot"
 main = "src/index.ts"
 compatibility_date = "2024-03-20"
 
